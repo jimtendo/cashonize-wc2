@@ -1,4 +1,4 @@
-import { encodeTransaction, generateTransaction, hash256, generateSigningSerializationBCH, SigningSerializationFlag, decodePrivateKeyWif, secp256k1, authenticationTemplateToCompilerBCH, importAuthenticationTemplate, authenticationTemplateP2pkhNonHd, lockingBytecodeToCashAddress, decodeAuthenticationInstructions, binToHex, hexToBin, decodeCashAddress, binsAreEqual, cashAddressToLockingBytecode, decodeTransaction } from "@bitauth/libauth";
+import { encodeTransaction, generateTransaction, hash256, generateSigningSerializationBCH, SigningSerializationFlag, decodePrivateKeyWif, secp256k1, authenticationTemplateToCompilerBCH, importAuthenticationTemplate, authenticationTemplateP2pkhNonHd, lockingBytecodeToCashAddress, decodeAuthenticationInstructions, binToHex, hexToBin, decodeCashAddress, binsAreEqual, cashAddressToLockingBytecode, decodeTransaction, createCompilerBCH, extractResolvedVariableBytecodeMap, stringify, encodeAuthenticationInstructions } from "@bitauth/libauth";
 
 const nameWallet = "mywallet";
 let historyUpdateInterval;
@@ -205,6 +205,31 @@ Web3Wallet.init({
       </div>`;
     proposalParent.innerHTML = approvalHtml;
   };
+
+  const getPrivateKey = async () => {
+    // decode private key for current signer
+    const wallet = await walletClass.named("mywallet")
+    const privateKeyWif = wallet.privateKeyWif;
+    const decodeResult = decodePrivateKeyWif(privateKeyWif);
+    if (typeof decodeResult === "string") {
+      throw new Error(decodeResult);
+    }
+    const privateKey = decodeResult.privateKey;
+    return privateKey;
+  }
+
+  const getPublicKey = async () => {
+    const privateKey = await getPrivateKey();
+
+    const pubkeyCompressed = secp256k1.derivePublicKeyCompressed(privateKey);
+    if (typeof pubkeyCompressed === "string") {
+      throw new Error(pubkeyCompressed)
+    }
+
+    console.log('pubkey', binToHex(pubkeyCompressed));
+
+    return pubkeyCompressed;
+  }
 
   const updateSessions = () => {
     const sessions = web3wallet.getActiveSessions();
@@ -490,7 +515,9 @@ Web3Wallet.init({
           methods: [
             "bch_getAddresses",
             "bch_signTransaction",
-            "bch_signMessage"
+            "bch_signMessage",
+            "bch_generateBytecode_V0",
+            "bch_authTemplate_V0",
           ],
           chains: walletClass.network === "testnet" ? ["bch:bchtest"] : ["bch:bitcoincash"],
           events: [
@@ -614,7 +641,7 @@ Web3Wallet.init({
       case "bch_getAccounts":
         {
           result = [walletAddress];
-          const response = { id, jsonrpc: '2.0', result };
+          const response = { id, jsonrpc: '2.0', result: stringify(result) };
           await web3wallet.respondSessionRequest({ topic, response });
         }
 
@@ -719,7 +746,8 @@ Web3Wallet.init({
       }
         break;
       case "bch_signTransaction": {
-        const params = parseExtendedJson(JSON.stringify(request.params));
+        // Parse the params from extended JSON.
+        const params = parseExtendedJson(request.params);
 
         if (typeof params.transaction === "string") {
           params.transaction = decodeTransaction(hexToBin(params.transaction));
@@ -1005,7 +1033,7 @@ Web3Wallet.init({
         setTimeout(() => {
           document.getElementById(`request-approve-button-${id}`).onclick = async () => {
             const result = await sign();
-            const response = { id, jsonrpc: '2.0', result };
+            const response = { id, jsonrpc: '2.0', result: stringify(result) };
             if (params.broadcast) {
               await wallet.submitTransaction(hexToBin(result.signedTransaction));
             }
@@ -1029,6 +1057,244 @@ Web3Wallet.init({
         }, 250);
       }
         break;
+
+      case 'bch_generateBytecode_V0': {
+        // Parse the params from extended JSON.
+        const params = parseExtendedJson(request.params);
+
+        console.log(params);
+
+        // Initialize an object to store our CashASM scripts.
+        const scripts = {};
+
+        // Iterate through each piece of data passed as a param and add it as a script.
+        for(const identifier of Object.keys(params.data)) {
+          scripts[identifier] = `<${identifier}>`;
+        }
+
+        // Set the default script.
+        // NOTE: We set this last
+        scripts['default'] = params.script;
+
+        // Initialize an object to store our variables.
+        const variables = {};
+
+        // Add the AddressData to our variables.
+        for(const identifer of Object.keys(params.data)) {
+          variables[identifer] = {
+            type: 'AddressData',
+          }
+        }
+
+        // Set the default wallet.
+        variables['wallet'] = {
+          type: 'Key'
+        }
+
+        // Create the compiler.
+        const compiler = createCompilerBCH({
+          scripts,
+          variables,
+        });
+
+        // Generate Bytecode.
+        const bytecode = compiler.generateBytecode({
+          data: {
+            bytecode: params.data,
+            keys: {
+              privateKeys: {
+                wallet: await getPrivateKey()
+              }
+            },
+          },
+          scriptId: 'default',
+          debug: true,
+        });
+
+        // If bytecode generation failed...
+        if(!bytecode.success) {
+          const response = { id, jsonrpc: '2.0', error: {code: 1001, message: bytecode.errors.map((error) => error.error).join(',') } };
+          await web3wallet.respondSessionRequest({ topic, response });
+          break;
+        }
+
+        // Extract the resolved data.
+        const resolvedData = extractResolvedVariableBytecodeMap(bytecode.resolve);
+
+        // TODO: Request Approval.
+        if(!confirm('Approve Generate Bytecode request?')) {
+            const response = { id, jsonrpc: '2.0', error: getSdkError('USER_REJECTED') };
+            await web3wallet.respondSessionRequest({ topic, response });
+            return;
+        }
+
+        // Convert the bytecode to hex for the response.
+        const response = { id, jsonrpc: '2.0', result: stringify({
+          bytecode: bytecode.bytecode,
+          resolvedData,
+        })};
+
+        // Send the response back to the client.
+        await web3wallet.respondSessionRequest({ topic, response });
+      }
+        break;
+
+      case 'bch_authTemplate_V0': {
+        // Parse the params from extended JSON.
+        const params = parseExtendedJson(request.params);
+
+        // Import the provided template.
+        const template = importAuthenticationTemplate(params.template);
+
+        // Ensure that parsing was successful.
+        if (typeof template === 'string') {
+          throw new Error(`Failed to parse the provided template: ${template}`);
+        }
+
+        // Create a compiler for this template.
+        const templateCompiler = authenticationTemplateToCompilerBCH(template);
+
+        // Compile our data.
+        const data = {
+          bytecode: params.data,
+          keys: {
+            privateKeys: {
+              [params.entityId]: await getPrivateKey(),
+            },
+          },
+        };
+
+        // Get the scenarios to execute.
+        const actionsToExecute = params.actions;
+
+        // Declare a stack to store the results of each executed scenario.
+        const resultStack = [];
+
+        // Iterate over the scenarios and execute each one.
+        for(const action of actionsToExecute) {
+          // Get the base transaction template for this scenario.
+          const baseTransactionTemplate = action.transaction;
+
+          // Ensure that it exists.
+          if(!baseTransactionTemplate) {
+            throw new Error('Failed to execute action: No transaction template provided');
+          }
+
+          /*
+          const redeemScripts = baseTransactionTemplate.outputs.map((output) => {
+            return templateCompiler.generateBytecode({
+              data,
+              debug: true,
+              scriptId: output.lockingBytecode.script,
+            });
+          });
+          */
+
+          // Transform the transaction so that it contains the compiler from template and data.
+          const transactionTransformed = {
+            version: baseTransactionTemplate.version,
+            locktime: baseTransactionTemplate.locktime,
+            // For each input in the scenario, append the compiler.
+            inputs: baseTransactionTemplate.inputs.map((input) => ({
+              ...input,
+              unlockingBytecode: {
+                ...input.unlockingBytecode,
+                compiler: templateCompiler,
+                data,
+              }
+            })),
+            // For each output in the scenario, append the compiler and data.
+            outputs: baseTransactionTemplate.outputs.map((output) => ({
+              ...output,
+              lockingBytecode: {
+                ...output.lockingBytecode,
+                compiler: templateCompiler,
+                data,
+              }
+            })),
+          };
+
+          // If the user's wallet should append unspents...
+          if (action.appendWalletUnspents) {
+            // TODO: Append unspents.
+          }
+
+          // Generate the transaction
+          const generatedTransaction = generateTransaction(transactionTransformed);
+
+          // Ensure the transaction generated successfully.
+          if (!generatedTransaction.success) {
+            // lmao but better to show it to help devs.
+            const errors = generatedTransaction.errors.map(error =>
+              error.errors.map(error => error.error).join(',')
+            ).join(',');
+
+            throw new Error(`Failed to generate transaction: ${errors}`);
+          }
+
+          const buildRedeemScripts = () => {
+            // Extract all scripts from template so that we can place them in our compiler.
+            const scripts = Object.keys(template.scripts).reduce((scripts, scriptId) => {
+              scripts[scriptId] = template.scripts[scriptId].script;
+              return scripts;
+            }, {});
+
+            // Extract all variables from template so that we can place them in our compiler.
+            const variables = {}
+            for (const entityId of Object.keys(template.entities)) {
+              const entity = template.entities[entityId];
+              if(entity.variables) {
+                for (const variableId of Object.keys(entity.variables)) {
+                  variables[variableId] = entity.variables[variableId];
+                }
+              }
+            }
+
+            // Generate any redeem scripts from outputs.
+            const redeemScriptCompiler = createCompilerBCH({
+              scripts,
+              variables,
+            });
+
+            const redeemScripts = [];
+
+            // Compile any scripts that appear in our outputs.
+            // NOTE: We do this because the service may want them.
+            //       For example, imagine a Settlement Service that needs to reconstruct from the redeem script.
+            //       If we only give back the transaction, the redeem script is unavailable because it's hashed.
+            for( const output of baseTransactionTemplate.outputs) {
+              // Generate Bytecode.
+              const bytecode = redeemScriptCompiler.generateBytecode({
+                data,
+                scriptId: output.lockingBytecode.script,
+                debug: true,
+              });
+
+              if(!bytecode.success) {
+                throw new Error(`Failed to build redeem script "${output.lockingBytecode.script}"`);
+              }
+
+              redeemScripts.push(bytecode.bytecode);
+            }
+
+            return redeemScripts;
+          }
+
+          // Push the result onto our result stack.
+          resultStack.push({
+            transaction: generatedTransaction.transaction,
+            redeemScripts: buildRedeemScripts(),
+          });
+        }
+
+        // Convert the bytecode to hex for the response.
+        const response = { id, jsonrpc: '2.0', result: stringify(resultStack)};
+
+        // Send the response back to the client.
+        await web3wallet.respondSessionRequest({ topic, response });
+      }
+        break;
+
       default:
         {
           const response = { id, jsonrpc: '2.0', error: {code: 1001, message: `Unsupported method ${method}`} };

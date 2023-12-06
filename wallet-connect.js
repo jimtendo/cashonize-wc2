@@ -1,5 +1,7 @@
 import { encodeTransaction, generateTransaction, hash256, generateSigningSerializationBCH, SigningSerializationFlag, decodePrivateKeyWif, secp256k1, authenticationTemplateToCompilerBCH, importAuthenticationTemplate, authenticationTemplateP2pkhNonHd, lockingBytecodeToCashAddress, decodeAuthenticationInstructions, binToHex, hexToBin, decodeCashAddress, binsAreEqual, cashAddressToLockingBytecode, decodeTransaction, createCompilerBCH, extractResolvedVariableBytecodeMap, stringify, encodeAuthenticationInstructions } from "@bitauth/libauth";
 
+import { WalletConnectService } from 'bch-wc2-experimental';
+
 const nameWallet = "mywallet";
 let historyUpdateInterval;
 
@@ -190,370 +192,13 @@ Web3Wallet.init({
   }
 }).then(async (web3wallet) =>
 {
-  const updateProposal = (proposal) => {
-    const proposalParent = document.getElementById("wc-session-approval");
 
-    const meta = proposal.params.proposer.metadata;
-    const peerName = meta.name;
-    const approvalHtml = /* html */`
-      <div id="proposal-${sanitize(proposal.id)}" style="display: flex; align-items: center; flex-direction: row; gap: 10px;">
-        <div id="proposal-app-icon" style="display: flex; align-items: center; height: 64px; width: 64px;"><img src="${sanitize(meta.icons[0])}"></div>
-        <div style="display: flex; flex-direction: column; width: 100%;">
-          <div id="proposal-app-name">${sanitize(peerName)}</div>
-          <div id="proposal-app-url"><a href="${sanitize(meta.url)}" target="_blank">${sanitize(meta.url)}</a></div>
-        </div>
-      </div>`;
-    proposalParent.innerHTML = approvalHtml;
-  };
+  updateSessionsUI();
+  updateHistoryUI();
 
-  const getPrivateKey = async () => {
-    // decode private key for current signer
-    const wallet = await walletClass.named("mywallet")
-    const privateKeyWif = wallet.privateKeyWif;
-    const decodeResult = decodePrivateKeyWif(privateKeyWif);
-    if (typeof decodeResult === "string") {
-      throw new Error(decodeResult);
-    }
-    const privateKey = decodeResult.privateKey;
-    return privateKey;
-  }
 
-  const getPublicKey = async () => {
-    const privateKey = await getPrivateKey();
 
-    const pubkeyCompressed = secp256k1.derivePublicKeyCompressed(privateKey);
-    if (typeof pubkeyCompressed === "string") {
-      throw new Error(pubkeyCompressed)
-    }
 
-    console.log('pubkey', binToHex(pubkeyCompressed));
-
-    return pubkeyCompressed;
-  }
-
-  const updateSessions = () => {
-    const sessions = web3wallet.getActiveSessions();
-    const keys = Object.keys(sessions).reverse();
-
-    const sessionParent = document.getElementById("wc-sessions");
-    sessionParent.innerHTML = "";
-    keys.forEach((key, index) => {
-      const session = sessions[key];
-      const meta = session.peer.metadata;
-      const peerName = meta.name + (keys.findIndex((val) =>
-        sessions[val].peer.metadata.name === meta.name &&
-        sessions[val].topic != session.topic) !== -1 ? ` - ${session.topic.slice(0, 6)}` : "");
-      const sessionHtml = /* html */`
-        <div id="session-${sanitize(session.topic)}" style="display: flex; align-items: center; flex-direction: row; gap: 10px; padding: 7px; ${index % 2 === 0 ? "" : "background: azure"}">
-          <div id="session-app-icon" style="display: flex; align-items: center; height: 64px; width: 64px;"><img src="${sanitize(meta.icons[0])}"></div>
-          <div style="display: flex; flex-direction: column; width: 100%;">
-            <div id="session-app-name">${sanitize(peerName)}</div>
-            <div id="session-app-url"><a href="${sanitize(meta.url)}" target="_blank">${sanitize(meta.url)}</a></div>
-            <div id="session-app-description">${sanitize(meta.description)}</div>
-          </div>
-          <div style="display: flex; flex-direction: column; gap: 1.5rem;">
-            <div id="session-settings-${sanitize(session.topic)}" style="height: 24px; width: 24px; cursor: pointer;"><img class="cogIcon icon"></div>
-            <div id="session-delete-${sanitize(session.topic)}" style="height: 24px; width: 24px; cursor: pointer;"><img class="trashIcon icon"></div>
-          </div>
-        </div>`;
-      sessionParent.innerHTML += sessionHtml;
-
-      setTimeout(() => {
-        document.getElementById(`session-delete-${session.topic}`).onclick = async () => {
-          await web3wallet.disconnectSession({
-            topic: session.topic,
-            reason: getSdkError("USER_DISCONNECTED")
-          });
-          document.getElementById(`session-${session.topic}`).remove();
-          const state = JSON.parse(localStorage.getItem("auto-approve") || "{}");
-          delete state[session.topic];
-          localStorage.setItem("auto-approve", JSON.stringify(state));
-        };
-
-        document.getElementById(`session-settings-${session.topic}`).onclick = async () => {
-          document.getElementById("wc-session-history-modal").style.display = "flex";
-          document.getElementById("wc-session-history-modal").dataset.topic = sanitize(session.topic);
-          updateHistory();
-        };
-      }, 250);
-    });
-  }
-
-  const updateHistory = async () => {
-    const allowedMethods = ["bch_signTransaction", "bch_signMessage"];
-    let history = core.history.values.filter(val => val.request.method === "wc_sessionRequest" && allowedMethods.includes(val.request?.params?.request?.method));
-    const topic = document.getElementById("wc-session-history-modal").dataset.topic;
-    if (topic) {
-      history = history.filter(val => val.topic === topic);
-    } else {
-      return;
-    }
-
-    const wallet = await walletClass.named(nameWallet);
-    const signingAddress = wallet.getDepositAddress();
-    const signingLockingBytecode = cashAddressToLockingBytecode(signingAddress).bytecode;
-
-    const state = JSON.parse(localStorage.getItem("auto-approve") || "{}");
-    document.getElementById(`session-auto`).checked = !!state[topic];
-    document.getElementById(`session-auto`).onclick = async (event) => {
-      toggleAutoApprove(topic, event.target.checked);
-    };
-    document.getElementById(`session-auto-requests`).onchange = (event) => {
-      document.getElementById(`session-auto-requests-left`).innerHTML = `${sanitize(event.target.value)} left`;
-      setAutoApproveState(topic, { requests: parseInt(event.target.value) });
-    }
-
-    document.getElementById(`session-auto-minutes`).onchange = (event) => {
-      const minutes = parseInt(event.target.value);
-      const timestamp = new Date().getTime() + minutes * 60000;
-      document.getElementById(`session-auto-minutes-left`).innerHTML = `${sanitize(minutes)}m left`;
-      setAutoApproveState(topic, { timestamp: timestamp });
-    }
-
-    checkAutoApproveTimeAndUpdateCounters(topic);
-
-    clearInterval(historyUpdateInterval);
-    historyUpdateInterval = setInterval(() => checkAutoApproveTimeAndUpdateCounters(topic), 60 * 1000);
-
-    const historyParent = document.getElementById("wc-history");
-    historyParent.innerHTML = "";
-    if (history.length === 0) {
-      historyParent.innerHTML =
-        /* html */ `<div style="display: flex; justify-content: center; margin-top: 2rem;">No activity yet<div>`;
-    } else {
-      history.reverse().forEach((item, index) => {
-        let historyHtml;
-        if (item.request.params?.request?.method === "bch_signMessage") {
-          const response = item.response?.error ? { title: "Error:", text: item.response.error.message } :
-                     item.response?.result ? { title: "Result:", text: item.response.result } :
-                     { title: "Response:", text: "No response." };
-
-          historyHtml = /* html */`
-            <div id="history-${sanitize(item.id)}" class="history-item" style="display: flex; align-items: center; flex-direction: row; gap: 10px; ${index % 2 === 0 ? "" : "background: ghostwhite"}">
-              <div style="display: flex; flex-direction: column; width: 100%; gap: 0.5rem">
-                <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem;">
-                  <div style="color: rgb(107 114 128); width: 75px;">Date:</div>
-                  <div class="history-value" style="overflow-wrap: break-word;">${sanitize(new Date(item.id / 1000).toUTCString())}</div>
-                </div>
-
-                <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-                  <div style="color: rgb(107 114 128); width: 75px;">Request:</div>
-                  <div class="history-value">${sanitize(item.request.params?.request?.method)}</div>
-                </div>
-
-                <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-                  <div style="color: rgb(107 114 128); width: 75px;">Address:</div>
-                  <div class="history-value-address" style="overflow-x: hidden; text-overflow: ellipsis; display: flex; flex-direction: row;"><div class="prefix-span">${sanitize(walletClass.networkPrefix)}:</div><div style="overflow-x: hidden; text-overflow: ellipsis;">${sanitize(item.request.params?.request?.params?.address.split(":")[1])}</div></div>
-                  <button type="button" style="background: none; padding: 0;" onclick="navigator.clipboard.writeText('${sanitize(item.request.params?.request?.params?.address)}')">
-                    <img class="copyIcon icon" src="/images/copy.svg">
-                  </button>
-                </div>
-
-                <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-                  <div style="color: rgb(107 114 128); width: 75px;">Message:</div>
-                  <div class="history-value" style="overflow-wrap: break-word;">${sanitize(item.request.params?.request?.params?.message)}</div>
-                </div>
-
-                <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-                  <div style="color: rgb(107 114 128); width: 75px;">${sanitize(response.title)}</div>
-                  <div class="history-value" style="overflow-wrap: break-word;">${sanitize(response.text)}</div>
-                </div>
-              </div>
-            </div>`;
-        } else if (item.request.params?.request?.method === "bch_signTransaction") {
-          const response = item.response?.error ? { title: "Error:", text: item.response.error.message } :
-            item.response?.result ? { title: "Result:", text: item.response.result.signedTransaction } :
-            { title: "Response:", text: "No response." };
-
-          const params = parseExtendedJson(JSON.stringify(item.request.params?.request?.params))
-          // item.request.params.request.params = parseExtendedJson(JSON.stringify(item.request.params?.request?.params));
-
-          const userPromptHtml = params.userPrompt ? /* html */ `
-            <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-              <div style="color: rgb(107 114 128); width: 75px;">Prompt:</div>
-              <div class="history-value">${sanitize(item.request.params?.request?.params?.userPrompt)}</div>
-            </div>` : "";
-
-          const sourceOutputsUnpacked = params.sourceOutputs;
-          const valueIn = sourceOutputsUnpacked.reduce((prev, curr) => prev + (binsAreEqual(signingLockingBytecode, curr.lockingBytecode) ? curr.valueSatoshis : 0n), 0n);
-          const valueOut = params.transaction.outputs.reduce((prev, curr) => prev + (binsAreEqual(signingLockingBytecode, curr.lockingBytecode) ? curr.valueSatoshis : 0n), 0n);
-          const valueTransfer = valueIn - valueOut;
-          sourceOutputsUnpacked.forEach((input, index) => {
-            const contractName = sourceOutputsUnpacked[index].contract?.artifact?.contractName;
-
-            if (contractName) {
-              return;
-            }
-
-            // let us look at the inputs
-            const decoded = decodeAuthenticationInstructions(input.unlockingBytecode);
-            const redeemScript = (
-              decoded.splice(-1)[0]
-            )?.data;
-            if (redeemScript?.length) {
-              // if input is a contract interaction, let's lookup the contract map and update UI
-              // let's remove any contract constructor parameters 1 by 1 to get to the contract body
-              let script = redeemScript.slice();
-              let artifact = artifactMap[binToHex(script)];
-              while (!artifact) {
-                const decodedScript = decodeAuthenticationInstructions(script);
-                const [{ opcode }] = decodedScript.splice(0,1);
-                // if the opcode is a data push, we strip it and continue
-                if (opcode <= 96 /* OP_16 */) {
-                  script = encodeAuthenticationInstructions(decodedScript);
-                  artifact = artifactMap[binToHex(script)];
-                } else {
-                  return;
-                }
-              }
-
-              let abiFunction;
-              if (artifact.abi.length > 1) {
-                // expect to N abi parameters + 1 function index push
-                const abiFunctionIndex = Number(vmNumberToBigInt((decoded.splice(-1)[0]).data));
-                abiFunction = artifact.abi[abiFunctionIndex];
-              } else {
-                abiFunction = artifact.abi[0];
-              }
-              input.contract = {
-                ...input.contract,
-                artifact: {
-                  contractName: artifact.contractName
-                },
-                abiFunction: {
-                  name: abiFunction.name,
-                  inputs: undefined
-                },
-                redeemScript: undefined
-              }
-            }
-          });
-
-          const firstContract = sourceOutputsUnpacked.find(val => val.contract?.artifact?.contractName)?.contract;
-          const contractHtml = firstContract ? /* html */ `
-            <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-              <div style="color: rgb(107 114 128); width: 75px;">Contract:</div>
-              <div class="history-value">${sanitize(firstContract.artifact.contractName)} - ${sanitize(firstContract.abiFunction?.name)}</div>
-            </div>` : "";
-
-          const copyHtml = response.title === "Result:" ? /* html */ `
-            <button type="button" style="background: none; padding: 0;" onclick="navigator.clipboard.writeText('${sanitize(response.text)}')">
-              <img class="copyIcon icon" src="/images/copy.svg">
-            </button>` : "";
-
-          const valueHtml = /* html */ `
-            <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-              <div style="color: rgb(107 114 128); width: 75px;">Cost:</div>
-              <div class="history-value">${sanitize(satoshiToBCHString(valueTransfer))}</div>
-            </div>`;
-
-          // const inputValue = sourceOutputsUnpacked.reduce(val => val)
-          historyHtml = /* html */`
-          <div id="history-${sanitize(item.id)}" class="history-item" style="display: flex; align-items: center; flex-direction: row; gap: 10px; ${index % 2 === 0 ? "" : "background: ghostwhite"}">
-            <div style="display: flex; flex-direction: column; width: 100%; gap: 0.5rem">
-              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem;">
-                <div style="color: rgb(107 114 128); width: 75px;">Date:</div>
-                <div class="history-value" style="overflow-wrap: break-word;">${sanitize(new Date(item.id / 1000).toUTCString())}</div>
-              </div>
-
-              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-                <div style="color: rgb(107 114 128); width: 75px;">Request:</div>
-                <div class="history-value">${sanitize(item.request.params?.request?.method)}</div>
-              </div>
-
-              ${userPromptHtml}
-
-              ${contractHtml}
-
-              ${valueHtml}
-
-              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
-                <div style="color: rgb(107 114 128); width: 75px;">${sanitize(response.title)}</div>
-                <div class="history-value" style="overflow-wrap: break-word;">${sanitize(response.text.length > 20 ? response.text.slice(0, 20) + "..." : response.text)}${copyHtml}</div>
-              </div>
-            </div>
-        </div>`;
-        }
-
-        historyParent.innerHTML += historyHtml;
-      });
-    }
-  }
-
-  updateSessions();
-  updateHistory();
-
-  core.history.on(HISTORY_EVENTS.created, updateHistory);
-  core.history.on(HISTORY_EVENTS.updated, updateHistory);
-
-  const renderSessionProposal = async (sessionProposal) => {
-    const { requiredNamespaces } = sessionProposal.params;
-
-    if (!requiredNamespaces.bch) {
-      alert(`You are trying to connect an app from unsupported blockchain(s): ${Object.keys(requiredNamespaces).join(", ")}`);
-      return;
-    }
-
-    const requiredNetworkPrefix = requiredNamespaces.bch.chains[0]?.split(":")[1];
-    let needsNetworkSwitch = false;
-    if (walletClass.networkPrefix !== requiredNetworkPrefix) {
-      needsNetworkSwitch = true;
-      const requiredNetworkFullName = requiredNetworkPrefix === "bchtest" ? "BCH Chipnet" : "BCH Mainnet";
-      document.getElementById("session-approve-button").value = `Switch to ${requiredNetworkFullName} and approve`;
-    }
-
-    document.getElementById("session-approve-button").onclick = async () => {
-      if (needsNetworkSwitch) {
-        const networkName = requiredNetworkPrefix === "bchtest" ? "chipnet" : "mainnet";
-        changeNetwork({ target: { value: networkName } });
-        changeView(4);
-      }
-
-      const wallet = await walletClass.named(nameWallet);
-      const namespaces = {
-        bch: {
-          methods: [
-            "bch_getAddresses",
-            "bch_signTransaction",
-            "bch_signMessage",
-            "bch_generateBytecode_V0",
-            "bch_authTemplate_V0",
-          ],
-          chains: walletClass.network === "testnet" ? ["bch:bchtest"] : ["bch:bitcoincash"],
-          events: [
-            "addressesChanged"
-          ],
-          accounts: [`bch:${wallet.getDepositAddress()}`],
-        }
-      }
-
-      await web3wallet.approveSession({
-        id: sessionProposal.id,
-        namespaces: namespaces,
-      });
-      document.getElementById("wc-session-approval-modal").style.display = "none";
-
-      updateSessions();
-      updateHistory();
-    };
-
-    document.getElementById("session-reject-button").onclick = async () => {
-      await web3wallet.rejectSession({
-        id: sessionProposal.id,
-        reason: getSdkError('USER_REJECTED'),
-      });
-      document.getElementById("wc-session-approval-modal").style.display = "none";
-
-      updateSessions();
-      updateHistory();
-    };
-
-    updateProposal(sessionProposal);
-    updateSessions();
-    updateHistory();
-
-    document.getElementById("wc-session-approval-modal").style.display = "flex";
-  }
 
   const renderSessionProposals = async () => {
     const getPendingSessionProposals = web3wallet.getPendingSessionProposals();
@@ -562,45 +207,7 @@ Web3Wallet.init({
     }
   }
 
-  web3wallet.on('session_proposal', renderSessionProposal);
-
-  web3wallet.on('session_delete', async params => {
-    updateSessions();
-    updateHistory();
-  });
-
-  const connectButton = document.getElementById("connect-button");
-  connectButton.onclick = async () => {
-    try {
-      const uri = document.getElementById("wcUri").value;
-      if (!uri) {
-        throw new Error("Please paste valid Wallet Connect V2 connection URI");
-      }
-      await web3wallet.core.pairing.pair({ uri });
-      document.getElementById("wcUri").value = "";
-    } catch (err) {
-      alert(`Error connecting with dApp:\n${err.mesage ?? err}`);
-    } finally {
-      connectButton.disabled = false;
-    }
-  };
-
-  const scanButton = document.getElementById("scan-button");
-  scanButton.onclick = async () => {
-    document.getElementById("wc-session-scan-modal").style.display = "flex";
-    html5QrcodeScanner = new Html5QrcodeScanner(
-      "reader",
-      { fps: 3, qrbox: {width: 250, height: 250},
-        formatsToSupport: [0]
-      },
-      /* verbose= */ false);
-    html5QrcodeScanner.render(async (decodedText) => {
-      document.getElementById("wc-session-scan-modal").style.display = "none";
-      await html5QrcodeScanner?.clear();
-      document.getElementById("wcUri").value = decodedText;
-      connectButton.click();
-    }, () => {});
-  }
+  // NOTE: Buttons used to be here.
 
   web3wallet.on('session_request', async event => {
     renderRequests();
@@ -1057,244 +664,6 @@ Web3Wallet.init({
         }, 250);
       }
         break;
-
-      case 'bch_generateBytecode_V0': {
-        // Parse the params from extended JSON.
-        const params = parseExtendedJson(request.params);
-
-        console.log(params);
-
-        // Initialize an object to store our CashASM scripts.
-        const scripts = {};
-
-        // Iterate through each piece of data passed as a param and add it as a script.
-        for(const identifier of Object.keys(params.data)) {
-          scripts[identifier] = `<${identifier}>`;
-        }
-
-        // Set the default script.
-        // NOTE: We set this last
-        scripts['default'] = params.script;
-
-        // Initialize an object to store our variables.
-        const variables = {};
-
-        // Add the AddressData to our variables.
-        for(const identifer of Object.keys(params.data)) {
-          variables[identifer] = {
-            type: 'AddressData',
-          }
-        }
-
-        // Set the default wallet.
-        variables['wallet'] = {
-          type: 'Key'
-        }
-
-        // Create the compiler.
-        const compiler = createCompilerBCH({
-          scripts,
-          variables,
-        });
-
-        // Generate Bytecode.
-        const bytecode = compiler.generateBytecode({
-          data: {
-            bytecode: params.data,
-            keys: {
-              privateKeys: {
-                wallet: await getPrivateKey()
-              }
-            },
-          },
-          scriptId: 'default',
-          debug: true,
-        });
-
-        // If bytecode generation failed...
-        if(!bytecode.success) {
-          const response = { id, jsonrpc: '2.0', error: {code: 1001, message: bytecode.errors.map((error) => error.error).join(',') } };
-          await web3wallet.respondSessionRequest({ topic, response });
-          break;
-        }
-
-        // Extract the resolved data.
-        const resolvedData = extractResolvedVariableBytecodeMap(bytecode.resolve);
-
-        // TODO: Request Approval.
-        if(!confirm('Approve Generate Bytecode request?')) {
-            const response = { id, jsonrpc: '2.0', error: getSdkError('USER_REJECTED') };
-            await web3wallet.respondSessionRequest({ topic, response });
-            return;
-        }
-
-        // Convert the bytecode to hex for the response.
-        const response = { id, jsonrpc: '2.0', result: stringify({
-          bytecode: bytecode.bytecode,
-          resolvedData,
-        })};
-
-        // Send the response back to the client.
-        await web3wallet.respondSessionRequest({ topic, response });
-      }
-        break;
-
-      case 'bch_authTemplate_V0': {
-        // Parse the params from extended JSON.
-        const params = parseExtendedJson(request.params);
-
-        // Import the provided template.
-        const template = importAuthenticationTemplate(params.template);
-
-        // Ensure that parsing was successful.
-        if (typeof template === 'string') {
-          throw new Error(`Failed to parse the provided template: ${template}`);
-        }
-
-        // Create a compiler for this template.
-        const templateCompiler = authenticationTemplateToCompilerBCH(template);
-
-        // Compile our data.
-        const data = {
-          bytecode: params.data,
-          keys: {
-            privateKeys: {
-              [params.entityId]: await getPrivateKey(),
-            },
-          },
-        };
-
-        // Get the scenarios to execute.
-        const actionsToExecute = params.actions;
-
-        // Declare a stack to store the results of each executed scenario.
-        const resultStack = [];
-
-        // Iterate over the scenarios and execute each one.
-        for(const action of actionsToExecute) {
-          // Get the base transaction template for this scenario.
-          const baseTransactionTemplate = action.transaction;
-
-          // Ensure that it exists.
-          if(!baseTransactionTemplate) {
-            throw new Error('Failed to execute action: No transaction template provided');
-          }
-
-          /*
-          const redeemScripts = baseTransactionTemplate.outputs.map((output) => {
-            return templateCompiler.generateBytecode({
-              data,
-              debug: true,
-              scriptId: output.lockingBytecode.script,
-            });
-          });
-          */
-
-          // Transform the transaction so that it contains the compiler from template and data.
-          const transactionTransformed = {
-            version: baseTransactionTemplate.version,
-            locktime: baseTransactionTemplate.locktime,
-            // For each input in the scenario, append the compiler.
-            inputs: baseTransactionTemplate.inputs.map((input) => ({
-              ...input,
-              unlockingBytecode: {
-                ...input.unlockingBytecode,
-                compiler: templateCompiler,
-                data,
-              }
-            })),
-            // For each output in the scenario, append the compiler and data.
-            outputs: baseTransactionTemplate.outputs.map((output) => ({
-              ...output,
-              lockingBytecode: {
-                ...output.lockingBytecode,
-                compiler: templateCompiler,
-                data,
-              }
-            })),
-          };
-
-          // If the user's wallet should append unspents...
-          if (action.appendWalletUnspents) {
-            // TODO: Append unspents.
-          }
-
-          // Generate the transaction
-          const generatedTransaction = generateTransaction(transactionTransformed);
-
-          // Ensure the transaction generated successfully.
-          if (!generatedTransaction.success) {
-            // lmao but better to show it to help devs.
-            const errors = generatedTransaction.errors.map(error =>
-              error.errors.map(error => error.error).join(',')
-            ).join(',');
-
-            throw new Error(`Failed to generate transaction: ${errors}`);
-          }
-
-          const buildRedeemScripts = () => {
-            // Extract all scripts from template so that we can place them in our compiler.
-            const scripts = Object.keys(template.scripts).reduce((scripts, scriptId) => {
-              scripts[scriptId] = template.scripts[scriptId].script;
-              return scripts;
-            }, {});
-
-            // Extract all variables from template so that we can place them in our compiler.
-            const variables = {}
-            for (const entityId of Object.keys(template.entities)) {
-              const entity = template.entities[entityId];
-              if(entity.variables) {
-                for (const variableId of Object.keys(entity.variables)) {
-                  variables[variableId] = entity.variables[variableId];
-                }
-              }
-            }
-
-            // Generate any redeem scripts from outputs.
-            const redeemScriptCompiler = createCompilerBCH({
-              scripts,
-              variables,
-            });
-
-            const redeemScripts = [];
-
-            // Compile any scripts that appear in our outputs.
-            // NOTE: We do this because the service may want them.
-            //       For example, imagine a Settlement Service that needs to reconstruct from the redeem script.
-            //       If we only give back the transaction, the redeem script is unavailable because it's hashed.
-            for( const output of baseTransactionTemplate.outputs) {
-              // Generate Bytecode.
-              const bytecode = redeemScriptCompiler.generateBytecode({
-                data,
-                scriptId: output.lockingBytecode.script,
-                debug: true,
-              });
-
-              if(!bytecode.success) {
-                throw new Error(`Failed to build redeem script "${output.lockingBytecode.script}"`);
-              }
-
-              redeemScripts.push(bytecode.bytecode);
-            }
-
-            return redeemScripts;
-          }
-
-          // Push the result onto our result stack.
-          resultStack.push({
-            transaction: generatedTransaction.transaction,
-            redeemScripts: buildRedeemScripts(),
-          });
-        }
-
-        // Convert the bytecode to hex for the response.
-        const response = { id, jsonrpc: '2.0', result: stringify(resultStack)};
-
-        // Send the response back to the client.
-        await web3wallet.respondSessionRequest({ topic, response });
-      }
-        break;
-
       default:
         {
           const response = { id, jsonrpc: '2.0', error: {code: 1001, message: `Unsupported method ${method}`} };
@@ -1306,21 +675,436 @@ Web3Wallet.init({
   renderSessionProposals();
   renderRequests();
 
-  const wcuri = new URL(window.location.href.replace("#", "")).searchParams.get("uri");
-  if (wcuri && wcuri.indexOf("wc:") === 0) {
-    const pairings = web3wallet.core.pairing.pairings.getAll();
-    const topic = wcuri.match(/^wc:([a-zA-Z0-9]+).*/)?.[1];
-    if (pairings.some(val => val.topic === topic)) {
-      // skip
-    } else {
-      document.getElementById("wcUri").value = wcuri;
-      setTimeout(connectButton.onclick(), 250);
-      window.history.replaceState(null, "Cashonize", "/");
-      document.getElementById("view4").click();
-    }
-  }
+
 });
 };
 
 window.initWalletConnect = initWalletConnect;
 initWalletConnect();
+
+async function getPrivateKey() {
+  // decode private key for current signer
+  const wallet = await walletClass.named("mywallet")
+  const privateKeyWif = wallet.privateKeyWif;
+  const decodeResult = decodePrivateKeyWif(privateKeyWif);
+  if (typeof decodeResult === "string") {
+    throw new Error(decodeResult);
+  }
+  const privateKey = decodeResult.privateKey;
+  return privateKey;
+}
+
+function showSessionProposal(proposal) {
+  const proposalParent = document.getElementById("wc-session-approval");
+
+  const meta = proposal.params.proposer.metadata;
+  const peerName = meta.name;
+  const approvalHtml = /* html */`
+    <div id="proposal-${sanitize(proposal.id)}" style="display: flex; align-items: center; flex-direction: row; gap: 10px;">
+      <div id="proposal-app-icon" style="display: flex; align-items: center; height: 64px; width: 64px;"><img src="${sanitize(meta.icons[0])}"></div>
+      <div style="display: flex; flex-direction: column; width: 100%;">
+        <div id="proposal-app-name">${sanitize(peerName)}</div>
+        <div id="proposal-app-url"><a href="${sanitize(meta.url)}" target="_blank">${sanitize(meta.url)}</a></div>
+      </div>
+    </div>`;
+  proposalParent.innerHTML = approvalHtml;
+};
+
+async function onSessionProposal(sessionProposal) {
+  return new Promise(async (resolve, reject) => {
+    // Ensure we are on the correct network (mainnet or chipnet).
+    const requiredNetworkPrefix = sessionProposal.params.requiredNamespaces.bch.chains[0]?.split(":")[1];
+    let needsNetworkSwitch = false;
+    if (walletClass.networkPrefix !== requiredNetworkPrefix) {
+      needsNetworkSwitch = true;
+      const requiredNetworkFullName = requiredNetworkPrefix === "bchtest" ? "BCH Chipnet" : "BCH Mainnet";
+      document.getElementById("session-approve-button").value = `Switch to ${requiredNetworkFullName} and approve`;
+    }
+
+    // On approve button clicked...
+    document.getElementById("session-approve-button").onclick = async () => {
+      if (needsNetworkSwitch) {
+        const networkName = requiredNetworkPrefix === "bchtest" ? "chipnet" : "mainnet";
+        changeNetwork({ target: { value: networkName } });
+        changeView(4);
+      }
+
+      // Resolve the promise, returning the Private Key.
+      resolve(await getPrivateKey());
+
+      // Hide the dialog.
+      document.getElementById("wc-session-approval-modal").style.display = "none";
+
+      // Update the UI.
+      updateSessionsUI();
+      updateHistoryUI();
+    };
+
+    // On reject button clicked...
+    document.getElementById("session-reject-button").onclick = async () => {
+      // Reject the promise.
+      reject(getSdkError('USER_REJECTED'));
+
+      // Hide the dialog.
+      document.getElementById("wc-session-approval-modal").style.display = "none";
+
+      // Update the UI.
+      updateSessionsUI();
+      updateHistoryUI();
+    };
+
+    // Render the session proposal.
+    showSessionProposal(sessionProposal);
+
+    // Update the UI.
+    updateSessionsUI();
+    updateHistoryUI();
+
+    // Show the dialog.
+    document.getElementById("wc-session-approval-modal").style.display = "flex";
+  });
+}
+
+async function onSessionDelete() {
+  updateSessionsUI();
+  updateHistoryUI();
+}
+
+//-----------------------------------------------------------------------------
+// Wallet Connect Service
+//-----------------------------------------------------------------------------
+
+const walletConnectService = new WalletConnectService(
+  '3fd234b8e2cd0e1da4bc08a0011bbf64',
+  {
+    name: 'Cashonize',
+    description: 'Cashonize BitcoinCash Web Wallet',
+    url: 'cashonize.com/',
+    icons: ['https://cashonize.com/images/favicon.ico'],
+  },
+  {
+    // Session Callbacks.
+    onSessionProposal: onSessionProposal,
+    onSessionDelete: onSessionDelete,
+
+    // RPC Callbacks.
+    onCompileScriptV0: () => { alert('Approve Compile Script') },
+    onGetAddressV0: () => { alert('Approve Get Addresses') },
+    onSignTransactionV0: () => { alert('Approve Sign Transaction') },
+  }
+);
+
+walletConnectService.core.history.on(HISTORY_EVENTS.created, updateHistoryUI);
+walletConnectService.core.history.on(HISTORY_EVENTS.updated, updateHistoryUI);
+
+await walletConnectService.start();
+
+//-----------------------------------------------------------------------------
+// State UI
+//-----------------------------------------------------------------------------
+
+async function updateSessionsUI() {
+  const sessions = walletConnectService.web3Wallet.getActiveSessions();
+  const keys = Object.keys(sessions).reverse();
+
+  const sessionParent = document.getElementById("wc-sessions");
+  sessionParent.innerHTML = "";
+  keys.forEach((key, index) => {
+    const session = sessions[key];
+    const meta = session.peer.metadata;
+    const peerName = meta.name + (keys.findIndex((val) =>
+      sessions[val].peer.metadata.name === meta.name &&
+      sessions[val].topic != session.topic) !== -1 ? ` - ${session.topic.slice(0, 6)}` : "");
+    const sessionHtml = /* html */`
+      <div id="session-${sanitize(session.topic)}" style="display: flex; align-items: center; flex-direction: row; gap: 10px; padding: 7px; ${index % 2 === 0 ? "" : "background: azure"}">
+        <div id="session-app-icon" style="display: flex; align-items: center; height: 64px; width: 64px;"><img src="${sanitize(meta.icons[0])}"></div>
+        <div style="display: flex; flex-direction: column; width: 100%;">
+          <div id="session-app-name">${sanitize(peerName)}</div>
+          <div id="session-app-url"><a href="${sanitize(meta.url)}" target="_blank">${sanitize(meta.url)}</a></div>
+          <div id="session-app-description">${sanitize(meta.description)}</div>
+        </div>
+        <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+          <div id="session-settings-${sanitize(session.topic)}" style="height: 24px; width: 24px; cursor: pointer;"><img class="cogIcon icon"></div>
+          <div id="session-delete-${sanitize(session.topic)}" style="height: 24px; width: 24px; cursor: pointer;"><img class="trashIcon icon"></div>
+        </div>
+      </div>`;
+    sessionParent.innerHTML += sessionHtml;
+
+    setTimeout(() => {
+      document.getElementById(`session-delete-${session.topic}`).onclick = async () => {
+        await walletConnectService.web3Wallet.disconnectSession({
+          topic: session.topic,
+          reason: getSdkError("USER_DISCONNECTED")
+        });
+        document.getElementById(`session-${session.topic}`).remove();
+        const state = JSON.parse(localStorage.getItem("auto-approve") || "{}");
+        delete state[session.topic];
+        localStorage.setItem("auto-approve", JSON.stringify(state));
+      };
+
+      document.getElementById(`session-settings-${session.topic}`).onclick = async () => {
+        document.getElementById("wc-session-history-modal").style.display = "flex";
+        document.getElementById("wc-session-history-modal").dataset.topic = sanitize(session.topic);
+        updateHistoryUI();
+      };
+    }, 250);
+  });
+}
+
+async function updateHistoryUI() {
+  const allowedMethods = ["bch_signTransaction", "bch_signMessage"];
+  let history = core.history.values.filter(val => val.request.method === "wc_sessionRequest" && allowedMethods.includes(val.request?.params?.request?.method));
+  const topic = document.getElementById("wc-session-history-modal").dataset.topic;
+  if (topic) {
+    history = history.filter(val => val.topic === topic);
+  } else {
+    return;
+  }
+
+  const wallet = await walletClass.named(nameWallet);
+  const signingAddress = wallet.getDepositAddress();
+  const signingLockingBytecode = cashAddressToLockingBytecode(signingAddress).bytecode;
+
+  const state = JSON.parse(localStorage.getItem("auto-approve") || "{}");
+  document.getElementById(`session-auto`).checked = !!state[topic];
+  document.getElementById(`session-auto`).onclick = async (event) => {
+    toggleAutoApprove(topic, event.target.checked);
+  };
+  document.getElementById(`session-auto-requests`).onchange = (event) => {
+    document.getElementById(`session-auto-requests-left`).innerHTML = `${sanitize(event.target.value)} left`;
+    setAutoApproveState(topic, { requests: parseInt(event.target.value) });
+  }
+
+  document.getElementById(`session-auto-minutes`).onchange = (event) => {
+    const minutes = parseInt(event.target.value);
+    const timestamp = new Date().getTime() + minutes * 60000;
+    document.getElementById(`session-auto-minutes-left`).innerHTML = `${sanitize(minutes)}m left`;
+    setAutoApproveState(topic, { timestamp: timestamp });
+  }
+
+  checkAutoApproveTimeAndUpdateCounters(topic);
+
+  clearInterval(historyUpdateInterval);
+  historyUpdateInterval = setInterval(() => checkAutoApproveTimeAndUpdateCounters(topic), 60 * 1000);
+
+  const historyParent = document.getElementById("wc-history");
+  historyParent.innerHTML = "";
+  if (history.length === 0) {
+    historyParent.innerHTML =
+      /* html */ `<div style="display: flex; justify-content: center; margin-top: 2rem;">No activity yet<div>`;
+  } else {
+    history.reverse().forEach((item, index) => {
+      let historyHtml;
+      if (item.request.params?.request?.method === "bch_signMessage") {
+        const response = item.response?.error ? { title: "Error:", text: item.response.error.message } :
+                    item.response?.result ? { title: "Result:", text: item.response.result } :
+                    { title: "Response:", text: "No response." };
+
+        historyHtml = /* html */`
+          <div id="history-${sanitize(item.id)}" class="history-item" style="display: flex; align-items: center; flex-direction: row; gap: 10px; ${index % 2 === 0 ? "" : "background: ghostwhite"}">
+            <div style="display: flex; flex-direction: column; width: 100%; gap: 0.5rem">
+              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem;">
+                <div style="color: rgb(107 114 128); width: 75px;">Date:</div>
+                <div class="history-value" style="overflow-wrap: break-word;">${sanitize(new Date(item.id / 1000).toUTCString())}</div>
+              </div>
+
+              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+                <div style="color: rgb(107 114 128); width: 75px;">Request:</div>
+                <div class="history-value">${sanitize(item.request.params?.request?.method)}</div>
+              </div>
+
+              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+                <div style="color: rgb(107 114 128); width: 75px;">Address:</div>
+                <div class="history-value-address" style="overflow-x: hidden; text-overflow: ellipsis; display: flex; flex-direction: row;"><div class="prefix-span">${sanitize(walletClass.networkPrefix)}:</div><div style="overflow-x: hidden; text-overflow: ellipsis;">${sanitize(item.request.params?.request?.params?.address.split(":")[1])}</div></div>
+                <button type="button" style="background: none; padding: 0;" onclick="navigator.clipboard.writeText('${sanitize(item.request.params?.request?.params?.address)}')">
+                  <img class="copyIcon icon" src="/images/copy.svg">
+                </button>
+              </div>
+
+              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+                <div style="color: rgb(107 114 128); width: 75px;">Message:</div>
+                <div class="history-value" style="overflow-wrap: break-word;">${sanitize(item.request.params?.request?.params?.message)}</div>
+              </div>
+
+              <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+                <div style="color: rgb(107 114 128); width: 75px;">${sanitize(response.title)}</div>
+                <div class="history-value" style="overflow-wrap: break-word;">${sanitize(response.text)}</div>
+              </div>
+            </div>
+          </div>`;
+      } else if (item.request.params?.request?.method === "bch_signTransaction") {
+        const response = item.response?.error ? { title: "Error:", text: item.response.error.message } :
+          item.response?.result ? { title: "Result:", text: item.response.result.signedTransaction } :
+          { title: "Response:", text: "No response." };
+
+        const params = parseExtendedJson(JSON.stringify(item.request.params?.request?.params))
+        // item.request.params.request.params = parseExtendedJson(JSON.stringify(item.request.params?.request?.params));
+
+        const userPromptHtml = params.userPrompt ? /* html */ `
+          <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+            <div style="color: rgb(107 114 128); width: 75px;">Prompt:</div>
+            <div class="history-value">${sanitize(item.request.params?.request?.params?.userPrompt)}</div>
+          </div>` : "";
+
+        const sourceOutputsUnpacked = params.sourceOutputs;
+        const valueIn = sourceOutputsUnpacked.reduce((prev, curr) => prev + (binsAreEqual(signingLockingBytecode, curr.lockingBytecode) ? curr.valueSatoshis : 0n), 0n);
+        const valueOut = params.transaction.outputs.reduce((prev, curr) => prev + (binsAreEqual(signingLockingBytecode, curr.lockingBytecode) ? curr.valueSatoshis : 0n), 0n);
+        const valueTransfer = valueIn - valueOut;
+        sourceOutputsUnpacked.forEach((input, index) => {
+          const contractName = sourceOutputsUnpacked[index].contract?.artifact?.contractName;
+
+          if (contractName) {
+            return;
+          }
+
+          // let us look at the inputs
+          const decoded = decodeAuthenticationInstructions(input.unlockingBytecode);
+          const redeemScript = (
+            decoded.splice(-1)[0]
+          )?.data;
+          if (redeemScript?.length) {
+            // if input is a contract interaction, let's lookup the contract map and update UI
+            // let's remove any contract constructor parameters 1 by 1 to get to the contract body
+            let script = redeemScript.slice();
+            let artifact = artifactMap[binToHex(script)];
+            while (!artifact) {
+              const decodedScript = decodeAuthenticationInstructions(script);
+              const [{ opcode }] = decodedScript.splice(0,1);
+              // if the opcode is a data push, we strip it and continue
+              if (opcode <= 96 /* OP_16 */) {
+                script = encodeAuthenticationInstructions(decodedScript);
+                artifact = artifactMap[binToHex(script)];
+              } else {
+                return;
+              }
+            }
+
+            let abiFunction;
+            if (artifact.abi.length > 1) {
+              // expect to N abi parameters + 1 function index push
+              const abiFunctionIndex = Number(vmNumberToBigInt((decoded.splice(-1)[0]).data));
+              abiFunction = artifact.abi[abiFunctionIndex];
+            } else {
+              abiFunction = artifact.abi[0];
+            }
+            input.contract = {
+              ...input.contract,
+              artifact: {
+                contractName: artifact.contractName
+              },
+              abiFunction: {
+                name: abiFunction.name,
+                inputs: undefined
+              },
+              redeemScript: undefined
+            }
+          }
+        });
+
+        const firstContract = sourceOutputsUnpacked.find(val => val.contract?.artifact?.contractName)?.contract;
+        const contractHtml = firstContract ? /* html */ `
+          <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+            <div style="color: rgb(107 114 128); width: 75px;">Contract:</div>
+            <div class="history-value">${sanitize(firstContract.artifact.contractName)} - ${sanitize(firstContract.abiFunction?.name)}</div>
+          </div>` : "";
+
+        const copyHtml = response.title === "Result:" ? /* html */ `
+          <button type="button" style="background: none; padding: 0;" onclick="navigator.clipboard.writeText('${sanitize(response.text)}')">
+            <img class="copyIcon icon" src="/images/copy.svg">
+          </button>` : "";
+
+        const valueHtml = /* html */ `
+          <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+            <div style="color: rgb(107 114 128); width: 75px;">Cost:</div>
+            <div class="history-value">${sanitize(satoshiToBCHString(valueTransfer))}</div>
+          </div>`;
+
+        // const inputValue = sourceOutputsUnpacked.reduce(val => val)
+        historyHtml = /* html */`
+        <div id="history-${sanitize(item.id)}" class="history-item" style="display: flex; align-items: center; flex-direction: row; gap: 10px; ${index % 2 === 0 ? "" : "background: ghostwhite"}">
+          <div style="display: flex; flex-direction: column; width: 100%; gap: 0.5rem">
+            <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem;">
+              <div style="color: rgb(107 114 128); width: 75px;">Date:</div>
+              <div class="history-value" style="overflow-wrap: break-word;">${sanitize(new Date(item.id / 1000).toUTCString())}</div>
+            </div>
+
+            <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+              <div style="color: rgb(107 114 128); width: 75px;">Request:</div>
+              <div class="history-value">${sanitize(item.request.params?.request?.method)}</div>
+            </div>
+
+            ${userPromptHtml}
+
+            ${contractHtml}
+
+            ${valueHtml}
+
+            <div style="display: flex; flex-direction: row; width: 100%; gap: 0.5rem">
+              <div style="color: rgb(107 114 128); width: 75px;">${sanitize(response.title)}</div>
+              <div class="history-value" style="overflow-wrap: break-word;">${sanitize(response.text.length > 20 ? response.text.slice(0, 20) + "..." : response.text)}${copyHtml}</div>
+            </div>
+          </div>
+      </div>`;
+      }
+
+      historyParent.innerHTML += historyHtml;
+    });
+  }
+}
+
+//-----------------------------------------------------------------------------
+// Setup UI Callbacks
+//-----------------------------------------------------------------------------
+
+// Connect Button
+const connectButton = document.getElementById("connect-button");
+connectButton.onclick = async () => {
+  try {
+    const uri = document.getElementById("wcUri").value;
+    if (!uri) {
+      throw new Error("Please paste valid Wallet Connect V2 connection URI");
+    }
+    await walletConnectService.core.pairing.pair({ uri });
+    document.getElementById("wcUri").value = "";
+  } catch (err) {
+    alert(`Error connecting with dApp:\n${err.mesage ?? err}`);
+  } finally {
+    connectButton.disabled = false;
+  }
+};
+
+// Scan Button
+const scanButton = document.getElementById("scan-button");
+scanButton.onclick = async () => {
+  document.getElementById("wc-session-scan-modal").style.display = "flex";
+  html5QrcodeScanner = new Html5QrcodeScanner(
+    "reader",
+    { fps: 3, qrbox: {width: 250, height: 250},
+      formatsToSupport: [0]
+    },
+    /* verbose= */ false);
+  html5QrcodeScanner.render(async (decodedText) => {
+    document.getElementById("wc-session-scan-modal").style.display = "none";
+    await html5QrcodeScanner?.clear();
+    document.getElementById("wcUri").value = decodedText;
+    connectButton.click();
+  }, () => {});
+}
+
+//-----------------------------------------------------------------------------
+// Handle URL
+//-----------------------------------------------------------------------------
+
+const wcuri = new URL(window.location.href.replace("#", "")).searchParams.get("uri");
+if (wcuri && wcuri.indexOf("wc:") === 0) {
+  const pairings = walletConnectService.core.pairing.pairings.getAll();
+  const topic = wcuri.match(/^wc:([a-zA-Z0-9]+).*/)?.[1];
+  if (pairings.some(val => val.topic === topic)) {
+    // skip
+  } else {
+    document.getElementById("wcUri").value = wcuri;
+    setTimeout(connectButton.onclick(), 250);
+    window.history.replaceState(null, "Cashonize", "/");
+    document.getElementById("view4").click();
+  }
+}

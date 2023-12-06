@@ -12,7 +12,7 @@
   <link rel="stylesheet" href="walletconnect.css">
   <link rel="stylesheet" href="switchery/switchery.css" />
   <script src="switchery/switchery.js"></script>
-  <script defer src="https://cdn.mainnet.cash/mainnet-1.1.32.js"></script>
+  <script src="https://cdn.mainnet.cash/mainnet-1.1.32.js"></script>
   <script>window.exports = {}</script>
   <script defer src="https://unpkg.com/@download/blockies@1.0.3/dist/blockies.min.js"></script>
   <script src="https://unpkg.com/@bitjson/qr-code@1.0.2/dist/qr-code.js"></script>
@@ -376,22 +376,241 @@
         </fieldset>
       </div>
 
-      <div id="walletConnectView" class="hide">
-        <fieldset id="sessions" style="display: block; margin-top: 15px">
-          <legend>Active Sessions</legend>
-          <p class="inputGroup">
-            <span style="width: 100%;" class="addressInput"><input id="wcUri" placeholder="Wallet Connect URI"></span>
-          </p>
-          <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 2rem;">
-            <input type="button" class="primaryButton" id="connect-button" value="Connect New dApp">
-            <input type="button" class="primaryButton" id="scan-button" value="Scan QR Code">
-          </div>
-          <div id="wc-sessions" style="display: flex; flex-direction: column; margin-top: 3rem;">
-          </div>
-        </fieldset>
+      <div id="cashrpc-over-wc-container">
+        <div id="walletConnectView" class="hide">
+          <fieldset id="sessions" style="display: block; margin-top: 15px">
+            <legend>Active Sessions</legend>
+            <p class="inputGroup">
+              <span style="width: 100%;" class="addressInput"><input id="wcUri" v-model="wcUri" placeholder="Wallet Connect URI"></span>
+            </p>
+            <div style="display: flex; flex-wrap: wrap; justify-content: center; gap: 2rem;">
+              <input type="button" class="primaryButton" id="connect-button" value="Connect New dApp" @click="pair(wcUri)">
+              <input type="button" class="primaryButton" id="scan-button" value="Scan QR Code">
+            </div>
+            <div id="wc-sessions" style="display: flex; flex-direction: column; margin-top: 3rem;">
+              <!-- Iterate over active sessions -->
+              <template v-for="(session, topic) of sessions" :key="topic">
+                <div style="display: flex; align-items: center; flex-direction: row; gap: 10px; padding: 7px;">
+                  <div id="session-app-icon" style="display: flex; align-items: center; height: 64px; width: 64px;"><img :src="session.peer.metadata.icons[0]"></div>
+                  <div style="display: flex; flex-direction: column; width: 100%;">
+                    <div id="session-app-name">{{ session.peer.metadata.name }}</div>
+                    <div id="session-app-url"><a href="session.peer.metadata.url" target="_blank">{{ session.peer.metadata.url }}</a></div>
+                    <div id="session-app-description">{{ session.peer.metadata.description }}</div>
+                  </div>
+                  <div style="display: flex; flex-direction: column; gap: 1.5rem;">
+                    <div style="height: 24px; width: 24px; cursor: pointer;"><img class="cogIcon icon"></div>
+                    <div style="height: 24px; width: 24px; cursor: pointer;" @click="disconnectSession(topic)"><img class="trashIcon icon"></div>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </fieldset>
+        </div>
+
+        <div v-if="isSessionApprovalVisible" id="wc-session-approval-modal" class="wc-modal">
+          <!-- Iterate over pending session approval dialogs -->
+          <template v-for="(request, i) of sessionRequests" :key="request.session.topic">
+            <fieldset id="wc-session-approval-modal-inner" class="wc-modal-fieldset">
+              <legend style="font-size: larger;">Approve Session?</legend>
+              <div id="wc-session-approval" style="display: flex; flex-direction: column; gap: 1rem;">
+                <!-- App Info -->
+                <div style="display: flex; align-items: center; flex-direction: row; gap: 10px; padding: 7px;">
+                  <!-- App Icon -->
+                  <div id="session-app-icon" style="display: flex; align-items: center; height: 64px; width: 64px;">
+                    <img :src="request.session.params.proposer.metadata.icons[0]">
+                  </div>
+
+                  <!-- Metadata -->
+                  <div style="display: flex; flex-direction: column; width: 100%;">
+                    <div id="session-app-name">{{ request.session.params.proposer.metadata.name }}</div>
+                    <div id="session-app-url"><a :href="request.session.params.proposer.metadata.url" target="_blank">{{ request.session.params.proposer.metadata.url }}</a></div>
+                    <div id="session-app-description">{{ request.session.params.proposer.metadata.description }}</div>
+                  </div>
+                </div>
+
+                <!-- Namespaces -->
+                <div class="wc-modal-details">
+                  <!-- Template -->
+                  <div class="wc-modal-section">
+                    <div class="wc-modal-heading">Template</div>
+                    <a @click="viewTemplate(request.session.params.requiredNamespaces?.bch?.template)">{{ request.session.params.requiredNamespaces?.bch?.template.name }}</a> (Untrusted)
+                  </div>
+
+                  <!-- Methods -->
+                  <div class="wc-modal-section">
+                    <div class="wc-modal-heading">Methods</div>
+                    <ul>
+                      <li v-for="method of request.session.params.requiredNamespaces?.bch?.methods">{{ method }}</li>
+                    </ul>
+                  </div>
+
+                  <!-- Allowed Tokens -->
+                  <div class="wc-modal-section">
+                    <div class="wc-modal-heading">Allowed Tokens</div>
+                    <ul>
+                      <li v-for="allowedToken of request.session.params.requiredNamespaces?.bch?.allowedTokens">{{ allowedToken }}</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+              <!-- Approve/Reject Buttons -->
+              <div class="wc-modal-bottom-buttons">
+                <input class="button primary" type="button" value="Approve" @click="request.accept()">
+                <input class="button" type="button" value="Reject" @click="request.reject()">
+              </div>
+            </fieldset>
+          </template>
+        </div>
+
+        <div v-if="isRequestApprovalVisible" id="wc-session-request-modal-container" class="wc-modal">
+          <!-- Iterate over our session requests and display them. -->
+          <template v-for="({ method, session, params, response, modalId, accept, reject}, i) of rpcRequests" :key="i">
+            <!-- bch_signTransaction_V0 -->
+            <template v-if="method === 'bch_signTransaction_V0'">
+              <fieldset class="wc-modal-fieldset">
+                <legend class="wc-modal-fieldset-legend">Sign Transaction</legend>
+
+                <!-- Origin -->
+                <div style="font-size: large; margin-top: 2rem;">Origin:</div>
+                <div style="display: flex; align-items: center; flex-direction: row; gap: 10px; padding: 7px;">
+                  <div id="session-app-icon" style="display: flex; align-items: center; height: 64px; width: 64px;"><img :src="session.peer.metadata.icons[0]"></div>
+                  <div style="display: flex; flex-direction: column; width: 100%;">
+                    <div id="session-app-name">{{ session.peer.metadata.name }}</div>
+                    <div id="session-app-url" style="overflow-wrap: anywhere;"><a :href="session.peer.metadata.url" target="_blank">{{ session.peer.metadata.url }}</a></div>
+                    <div style="overflow-x: hidden; text-overflow: ellipsis; font-size: smaller;">{{ formatSessionSigner(session) }}</div>
+                  </div>
+                </div>
+
+                <hr style="margin-top:3rem" />
+
+                <div v-for="(tx, i) of params" class="wc-modal-details">
+                  <!-- User Prompt -->
+                  <div v-if="tx.userPrompt" style="display: flex; justify-content: center; font-size: larger;">{{ tx.userPrompt }}</div>
+
+                  <!-- Inputs -->
+                  <div class="wc-modal-heading">Inputs</div>
+                  <table class="wc-data-table">
+                    <tbody v-for="(input, index) of response[i].transaction.inputs">
+                      <tr>
+                        <td>{{ index }}</td>
+                        <td>{{ formatBin(input.outpointTransactionHash) }}:{{ input.outpointIndex }}</td>
+                        <td class="satoshis">
+                          {{ formatSats(response[i].sourceOutputs[index].valueSatoshis) }}
+                        </td>
+                      </tr>
+                      <!-- If there is data available for this input -->
+                      <tr v-if="tx.transaction.inputs?.[index]?.data">
+                        <td colspan="3">
+                          <table class="tx-data-table">
+                            <tbody>
+                              <tr>
+                                <td colspan="2">
+                                  <strong>{{ formatScriptName(tx.transaction.inputs[index].script, session.requiredNamespaces.bch.template) }}</strong>
+                                </td>
+                              </tr>
+                              <tr v-for="(value, id) of tx.transaction.inputs?.[index]?.data">
+                                <td>{{ formatDataName(id, session.requiredNamespaces.bch.template) }}</td>
+                                <td>{{ formatDataValue(value, id, session.requiredNamespaces.bch.template) }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  <!-- Outputs -->
+                  <div class="wc-modal-heading">Outputs</div>
+                  <table class="wc-data-table">
+                    <tbody v-for="(output, index) of response[i].transaction.outputs">
+                      <tr>
+                        <td>{{ index }}</td>
+                        <td>{{ formatLockscript(output.lockingBytecode) }}</td>
+                        <td class="satoshis">{{ formatSats(output.valueSatoshis) }}</td>
+                      </tr>
+                      <!-- If there is a token available on this output -->
+                      <tr v-if="output.token">
+                        <td colspan="3">
+                          <table class="tx-data-table">
+                            <tbody>
+                              <tr>
+                                <td>
+                                  Token: {{ formatBin(output.token.category) }}
+                                </td>
+                                <td>
+                                  Amount: {{ Number(output.token.amount) }}
+                                </td>
+                              </tr>
+                              <tr v-if="output.token?.nft">
+                                <td>Commitment: {{ formatBin(output.token.nft.commitment) }}</td>
+                                <td>Capability: {{ output.token.nft.capability }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                      <!-- If there is data available for this output -->
+                      <tr v-if="tx.transaction.outputs?.[index]?.data">
+                        <td colspan="3">
+                          <table class="tx-data-table">
+                            <tbody>
+                              <tr>
+                                <td colspan="2">
+                                  <strong>{{ formatScriptName(tx.transaction.outputs[index].script, session.requiredNamespaces.bch.template) }}</strong>
+                                </td>
+                              </tr>
+                              <tr v-for="(value, id) of tx.transaction.outputs?.[index]?.data">
+                                <td>{{ formatDataName(id, session.requiredNamespaces.bch.template) }}</td>
+                                <td>{{ formatDataValue(value, id, session.requiredNamespaces.bch.template) }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+
+                  <hr style="margin-top: 3rem;" />
+                </div>
+
+                <!-- Bottom Buttons -->
+                <div class="wc-modal-bottom-buttons">
+                  <input class="button primary" type="button" value="Sign" @click="accept(modalId)">
+                  <input class="button" type="button" value="Cancel" @click="reject(modalId)">
+                </div>
+              </fieldset>
+            </template>
+
+            <!-- Unhandled Method -->
+            <template v-else>
+              <fieldset class="wc-modal-fieldset">
+                <legend class="wc-modal-fieldset-legend">{{ method }}</legend>
+
+                <div>Params:</div>
+                <pre class="wc-pre">{{ params }}</pre>
+                <div>Response:</div>
+                <pre class="wc-pre">{{ response }}</pre>
+
+                <!-- Bottom Buttons -->
+                <div class="wc-modal-bottom-buttons">
+                  <input class="button primary" type="button" value="Sign" @click="accept(modalId)">
+                  <input class="button" type="button" value="Cancel" @click="reject(modalId)">
+                </div>
+              </fieldset>
+            </template>
+          </template>
+        </div>
+
+        <div id="wc-session-scan-modal" style="top: 0; display: none; position: fixed; align-items: center; justify-content: center; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); z-index: 10; width: 100%; height: 100%; padding: 5rem;">
+          <fieldset id="wc-session-scan-modal-inner" style="padding: 3rem; width: 350px; overflow-y: scroll; background-color: white;">
+            <legend class="wc-modal-fieldset-legend">Scan QR Code</legend>
+            <div id="reader"></div>
+          </fieldset>
+        </div>
       </div>
 
       <br>
+
       <footer class="footer hide" id="githubLink">
         <a href="https://github.com/cashonize/wallet" target="_blank" >
             <img class="githublogo" src="./images/github.png" alt="Github logo">
@@ -409,68 +628,18 @@
         
       </footer>
     </div>
-
-    <div id="wc-session-approval-modal" style="top: 0; display: none; position: fixed; align-items: center; justify-content: center; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); z-index: 10; width: 100%; height: 100%; padding: 5rem;">
-      <fieldset id="wc-session-approval-modal-inner" style="padding: 3rem; width: 100%; max-width: 500px; overflow-y: scroll; height: 250px; background-color: white;">
-        <legend style="font-size: larger;">Approve Session?</legend>
-        <div id="wc-session-approval" style="display: flex; flex-direction: column; gap: 1rem;">
-        </div>
-        <div style="margin-top: 1rem; display: flex; flex-wrap: wrap; gap: 1rem;">
-          <input id="session-approve-button" class="button primary" type="button" value="Approve">
-          <input id="session-reject-button" style="margin-left: 0;" class="button" type="button" value="Reject">
-        </div>
-      </fieldset>
-    </div>
-
-    <div id="wc-session-history-modal" style="top: 0; display: none; position: fixed; align-items: center; justify-content: center; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); z-index: 10; width: 100%; height: 100%;">
-      <fieldset id="wc-session-history-modal-inner" style="width: 100%; max-width: 500px; overflow-y: scroll; max-height: 90vh; background-color: white;">
-        <legend style="font-size: larger;">Session</legend>
-        <div style="display: flex; flex-direction: column; gap: 3px">
-          <div style="display: flex; align-items: center;">
-            <input type="checkbox" id="session-auto">
-            <label for="session-auto">Auto-approve requests</label>
-          </div>
-          <div style="display: flex; align-items: center;">
-            <input id="session-auto-requests" type="number" min="1" max="999" placeholder="For N requests" oninput="validity.valid||(value='');">
-            <span id="session-auto-requests-left" style="width: 77px; text-align: end;">&infin; left</span>
-          </div>
-          <div style="display: flex; align-items: center;">
-            <select id="session-auto-minutes">
-              <option disabled selected value="">For N minutes</option>
-              <option value="10">10 minutes</option>
-              <option value="30">30 minutes</option>
-              <option value="60">60 minutes</option>
-            </select>
-            <span id="session-auto-minutes-left" style="width: 77px; text-align: end;">&infin;m left</span>
-          </div>
-        </div>
-        <fieldset id="history" style="display: block; margin-top: 12px">
-          <legend>Request History</legend>
-          <div id="wc-history" style="display: flex; flex-direction: column; gap: 1rem;">
-          </div>
-        </fieldset>
-      </fieldset>
-    </div>
-
-    <div id="wc-session-request-modal-container" style="top: 0; display: none; flex-wrap: wrap-reverse; overflow-y: scroll; gap: 5rem; position: fixed; align-items: center; justify-content: center; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); z-index: 10; width: 100%; height: 100%;">
-    </div>
-
-    <div id="wc-session-scan-modal" style="top: 0; display: none; position: fixed; align-items: center; justify-content: center; backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px); z-index: 10; width: 100%; height: 100%; padding: 5rem;">
-      <fieldset id="wc-session-scan-modal-inner" style="padding: 3rem; width: 350px; overflow-y: scroll; background-color: white;">
-        <legend style="font-size: larger;">Scan QR Code</legend>
-        <div id="reader"></div>
-      </fieldset>
-    </div>
   </main>
 
   <script type="module" src="./script.js"></script>
-  <script type="module" src="./wallet-connect.js"></script>
+  <!--<script type="module" src="./wallet-connect.js"></script>-->
+  <script type="module" src="./wallet-connect-2.js"></script>
   <script type="module" src="./queryChainGraph.js"></script>
   <script>
     document.getElementById('qr1').addEventListener('codeRendered', () => {
       document.getElementById('qr1').animateQRCode('MaterializeIn');
     });
   </script>
+
 </body>
 
 </html>
